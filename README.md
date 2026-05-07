@@ -10,6 +10,12 @@ Datasets with `x,y,z` column names use the corresponding indices; 2D state datas
 3D+ state datasets without coordinate names fall back to `observation.state[:3]`.
 Speed is `||Δp|| / Δt` (state coordinate units per second), not a normalized value.
 
+## Examples
+
+| ALOHA EE XYZ pos | LIBERO EE XYZ pos |
+|:--:|:--:|
+| ![ALOHA example](src/example_aloha.png) | ![LIBERO example](src/example_libero.png) |
+
 ## 1) Installation
 
 ```bash
