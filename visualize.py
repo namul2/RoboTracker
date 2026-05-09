@@ -33,6 +33,50 @@ SOFT_TRAJ_CMAP = LinearSegmentedColormap.from_list(
     # ["#3850FF", "#6ea8ff", "#6eff86", "#ffc337", "#ff5148"],
 )
 
+# ── Forward Kinematics ────────────────────────────────────────────────────────
+
+# Standard DH parameters for Interbotix wx250s (approximate ALOHA arm geometry).
+# Each entry: (a [m], alpha [rad], d [m], theta_offset [rad])
+_DH_WX250S: List[Tuple[float, float, float, float]] = [
+    (0.04975,  np.pi / 2,  0.11069, 0.0),         # waist
+    (0.20630,  0.0,        0.0,     0.0),           # shoulder
+    (0.0,      np.pi / 2,  0.0,     np.pi / 2),    # elbow
+    (0.0,     -np.pi / 2,  0.19970, 0.0),           # forearm_roll
+    (0.0,      np.pi / 2,  0.0,     0.0),           # wrist_angle
+    (0.0,      0.0,        0.17400, 0.0),           # wrist_rotate → EE
+]
+
+# Map robot_type (from info.json) to DH param set
+_FK_REGISTRY: Dict[str, List[Tuple[float, float, float, float]]] = {
+    "aloha": _DH_WX250S,
+}
+
+
+def _dh_matrix(a: float, alpha: float, d: float, theta: float) -> "np.ndarray":
+    ct, st = np.cos(theta), np.sin(theta)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    return np.array([
+        [ct, -st * ca,  st * sa, a * ct],
+        [st,  ct * ca, -ct * sa, a * st],
+        [0.0, sa,       ca,      d],
+        [0.0, 0.0,      0.0,     1.0],
+    ])
+
+
+def _fk_batch(
+    joint_batch: "np.ndarray",
+    dh_params: List[Tuple[float, float, float, float]],
+) -> "np.ndarray":
+    """(N, n_joints) joint angles → (N, 3) EE Cartesian positions via DH FK."""
+    n = joint_batch.shape[0]
+    out = np.empty((n, 3), dtype=np.float64)
+    for i in range(n):
+        T = np.eye(4)
+        for j, (a, alpha, d, offset) in enumerate(dh_params):
+            T = T @ _dh_matrix(a, alpha, d, float(joint_batch[i, j]) + offset)
+        out[i] = T[:3, 3]
+    return out
+
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -43,6 +87,43 @@ class DatasetConfig:
     coord_labels: Tuple[str, ...]
     gripper_index: Optional[int]
     notes: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BimanualLayout:
+    left_joint_indices: Tuple[int, ...]
+    left_gripper_index: int
+    right_joint_indices: Tuple[int, ...]
+    right_gripper_index: int
+    left_joint_names: Tuple[str, ...]
+    right_joint_names: Tuple[str, ...]
+
+
+def _detect_bimanual_layout(feature: Dict[str, Any]) -> Optional["BimanualLayout"]:
+    """Return BimanualLayout if state feature names indicate a bimanual robot, else None."""
+    dim = _feature_dim(feature)
+    names = _feature_names(feature, dim)
+    if not names:
+        return None
+
+    left_joints = [(i, n) for i, n in enumerate(names)
+                   if n.startswith("left_") and "gripper" not in n]
+    right_joints = [(i, n) for i, n in enumerate(names)
+                    if n.startswith("right_") and "gripper" not in n]
+    left_grippers = [i for i, n in enumerate(names) if "left_gripper" in n]
+    right_grippers = [i for i, n in enumerate(names) if "right_gripper" in n]
+
+    if not (left_joints and right_joints and left_grippers and right_grippers):
+        return None
+
+    return BimanualLayout(
+        left_joint_indices=tuple(i for i, _ in left_joints),
+        left_gripper_index=left_grippers[0],
+        right_joint_indices=tuple(i for i, _ in right_joints),
+        right_gripper_index=right_grippers[0],
+        left_joint_names=tuple(n for _, n in left_joints),
+        right_joint_names=tuple(n for _, n in right_joints),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -522,6 +603,102 @@ def compute_episode_metrics(
     return all_positions, all_progress, start_points_arr, change_points_arr, speeds
 
 
+def load_full_state_by_episode(
+    parquet_files: Iterable[Path],
+    state_key: str,
+    episode_key: str,
+    timestamp_key: str,
+) -> Dict[int, Tuple["np.ndarray", "np.ndarray"]]:
+    """Load the full state vector per episode.
+
+    Returns {episode_id: (timestamps_1D, state_NxD)}.
+    """
+    per_ts: Dict[int, List["np.ndarray"]] = defaultdict(list)
+    per_state: Dict[int, List["np.ndarray"]] = defaultdict(list)
+
+    for f in parquet_files:
+        table = pq.read_table(f, columns=[state_key, episode_key, timestamp_key])
+        state = _to_2d_state_array(table[state_key].to_pylist())
+        episodes = np.asarray(table[episode_key].to_pylist(), dtype=np.int64)
+        timestamps = np.asarray(table[timestamp_key].to_pylist(), dtype=np.float64)
+
+        for ep in np.unique(episodes):
+            mask = episodes == ep
+            per_ts[int(ep)].append(timestamps[mask])
+            per_state[int(ep)].append(state[mask])
+
+    return {
+        ep: (np.concatenate(per_ts[ep]), np.concatenate(per_state[ep]))
+        for ep in per_ts
+    }
+
+
+def _compute_arm_metrics(
+    full_episode_data: Dict[int, Tuple["np.ndarray", "np.ndarray"]],
+    joint_indices: Tuple[int, ...],
+    gripper_index: int,
+    dh_params: Optional[List[Tuple[float, float, float, float]]],
+    gripper_change_threshold: float,
+) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray", "np.ndarray", "np.ndarray"]:
+    """Compute per-arm EE positions, progress, start points, gripper-change points, speeds.
+
+    When dh_params is provided, positions are Cartesian (m) via FK.
+    Otherwise, positions are the first 3 joint angles (rad) as a proxy.
+    """
+    pos_chunks: List["np.ndarray"] = []
+    prog_chunks: List["np.ndarray"] = []
+    speed_chunks: List["np.ndarray"] = []
+    start_points: List["np.ndarray"] = []
+    change_points: List["np.ndarray"] = []
+
+    for _, (ts, state) in full_episode_data.items():
+        if ts.size == 0:
+            continue
+
+        order = np.argsort(ts)
+        ts_s = ts[order]
+        state_s = state[order]
+
+        joints = state_s[:, list(joint_indices)]
+        gripper = state_s[:, gripper_index]
+
+        if dh_params is not None and len(joint_indices) == len(dh_params):
+            ee_pos = _fk_batch(joints, dh_params)
+        else:
+            ee_pos = joints[:, :min(3, joints.shape[1])]
+
+        n = ts_s.size
+        progress = np.linspace(0.0, 1.0, n, endpoint=True)
+        pos_chunks.append(ee_pos)
+        prog_chunks.append(progress)
+        start_points.append(ee_pos[0])
+
+        first_val = gripper[0]
+        changed = np.flatnonzero(np.abs(gripper - first_val) > gripper_change_threshold)
+        if changed.size > 0:
+            change_points.append(ee_pos[changed[0]])
+
+        if n >= 2:
+            dt = np.diff(ts_s)
+            dp = np.linalg.norm(np.diff(ee_pos, axis=0), axis=1)
+            valid = dt > 1e-9
+            if np.any(valid):
+                speed_chunks.append(dp[valid] / dt[valid])
+
+    if not pos_chunks:
+        raise ValueError("No valid episode data found.")
+
+    pos_dim = pos_chunks[0].shape[1]
+    return (
+        np.concatenate(pos_chunks),
+        np.concatenate(prog_chunks),
+        np.asarray(start_points, dtype=np.float64),
+        np.asarray(change_points, dtype=np.float64) if change_points
+        else np.empty((0, pos_dim), dtype=np.float64),
+        np.concatenate(speed_chunks) if speed_chunks else np.empty(0, dtype=np.float64),
+    )
+
+
 def maybe_downsample(
     points: np.ndarray, progress: np.ndarray, max_points: int, seed: int
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -720,6 +897,116 @@ def plot_ee_projection(
     plt.close(fig)
 
 
+def plot_joint_distributions(
+    all_state: "np.ndarray",
+    joint_indices: Tuple[int, ...],
+    gripper_index: int,
+    joint_names: Tuple[str, ...],
+    arm_name: str,
+    out_path: Path,
+) -> None:
+    """Grid of per-joint angle histograms for one arm."""
+    items = list(zip(joint_indices, joint_names)) + [(gripper_index, "gripper")]
+    n_total = len(items)
+    ncols = 4
+    nrows = (n_total + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3.2, nrows * 2.8))
+    axes_flat = np.asarray(axes).flatten()
+
+    joint_color = "#5b8cf5"
+    gripper_color = "#f57c5b"
+
+    for k, (idx, name) in enumerate(items):
+        ax = axes_flat[k]
+        color = gripper_color if "gripper" in name else joint_color
+        ax.hist(all_state[:, idx], bins=60, color=color, alpha=0.85, edgecolor="none")
+        short = name.replace("left_", "").replace("right_", "")
+        ax.set_title(short, fontsize=9)
+        ax.set_xlabel("rad", fontsize=8)
+        ax.set_ylabel("count", fontsize=8)
+        ax.tick_params(labelsize=7)
+
+    for k in range(n_total, len(axes_flat)):
+        axes_flat[k].set_visible(False)
+
+    fig.suptitle(f"{arm_name.capitalize()} Arm — Joint Angle Distributions", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
+_CMAP_LEFT = LinearSegmentedColormap.from_list("left_cmap", ["#003380", "#66b3ff"])
+_CMAP_RIGHT = LinearSegmentedColormap.from_list("right_cmap", ["#8b0000", "#ff9999"])
+
+
+def plot_bimanual_ee_combined(
+    left_pos: "np.ndarray",
+    left_prog: "np.ndarray",
+    right_pos: "np.ndarray",
+    right_prog: "np.ndarray",
+    left_start: "np.ndarray",
+    right_start: "np.ndarray",
+    left_change: "np.ndarray",
+    right_change: "np.ndarray",
+    cartesian: bool,
+    out_path: Path,
+) -> None:
+    """3D scatter of both EE trajectories on a shared axis."""
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.scatter(left_pos[:, 0], left_pos[:, 1], left_pos[:, 2],
+               c=left_prog, cmap=_CMAP_LEFT, s=1.8, alpha=0.55, linewidths=0)
+    ax.scatter(right_pos[:, 0], right_pos[:, 1], right_pos[:, 2],
+               c=right_prog, cmap=_CMAP_RIGHT, s=1.8, alpha=0.55, linewidths=0)
+
+    # Proxy artists for the legend (scatter dots are too small to show)
+    from matplotlib.lines import Line2D
+    legend_handles = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#66b3ff", markersize=8, label="Left EE"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#ff9999", markersize=8, label="Right EE"),
+    ]
+
+    if left_start.size > 0:
+        ax.scatter(left_start[:, 0], left_start[:, 1], left_start[:, 2],
+                   marker="^", c="#00aaff", s=36, alpha=0.9, zorder=5)
+        legend_handles.append(
+            Line2D([0], [0], marker="^", color="w", markerfacecolor="#00aaff",
+                   markersize=8, label="Left start"))
+    if right_start.size > 0:
+        ax.scatter(right_start[:, 0], right_start[:, 1], right_start[:, 2],
+                   marker="^", c="#ff4444", s=36, alpha=0.9, zorder=5)
+        legend_handles.append(
+            Line2D([0], [0], marker="^", color="w", markerfacecolor="#ff4444",
+                   markersize=8, label="Right start"))
+
+    if left_change.size > 0:
+        ax.scatter(left_change[:, 0], left_change[:, 1], left_change[:, 2],
+                   marker="x", c="#0055cc", s=42, alpha=0.85, zorder=5)
+        legend_handles.append(
+            Line2D([0], [0], marker="x", color="#0055cc", markersize=8,
+                   label="Left gripper chg", linestyle="None"))
+    if right_change.size > 0:
+        ax.scatter(right_change[:, 0], right_change[:, 1], right_change[:, 2],
+                   marker="x", c="#cc0000", s=42, alpha=0.85, zorder=5)
+        legend_handles.append(
+            Line2D([0], [0], marker="x", color="#cc0000", markersize=8,
+                   label="Right gripper chg", linestyle="None"))
+
+    unit = "m" if cartesian else "rad"
+    ax.set_xlabel(f"X ({unit})")
+    ax.set_ylabel(f"Y ({unit})")
+    ax.set_zlabel(f"Z ({unit})")
+    title = ("Bimanual EE — Cartesian (each arm in its own base frame)"
+             if cartesian else "Bimanual EE — Joint space (first 3 joints)")
+    ax.set_title(title, fontsize=10)
+    ax.legend(handles=legend_handles, fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
 def plot_speed_histogram(speeds: np.ndarray, bins: int, out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.hist(speeds, bins=bins)
@@ -783,6 +1070,129 @@ def _print_resolved_config(dataset_root: Path, config: DatasetConfig) -> None:
         print(f"  note: {note}")
 
 
+def analyze_bimanual_dataset(
+    dataset_root: Path,
+    parquet_files: List[Path],
+    info: Dict[str, Any],
+    layout: BimanualLayout,
+    config: DatasetConfig,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> dict:
+    robot_type = info.get("robot_type", "").lower()
+    dh_params = _FK_REGISTRY.get(robot_type)
+    has_fk = (
+        dh_params is not None
+        and len(layout.left_joint_indices) == len(dh_params)
+        and len(layout.right_joint_indices) == len(dh_params)
+    )
+    print(f"  Bimanual robot detected  robot_type='{robot_type}'  FK={'yes' if has_fk else 'no'}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    full_ep_data = load_full_state_by_episode(
+        parquet_files, config.state_key, config.episode_key, config.timestamp_key
+    )
+    all_state = np.concatenate([s for _, (_, s) in full_ep_data.items()], axis=0)
+
+    coord_labels = ("X", "Y", "Z")  # joint-space fallback or Cartesian
+
+    arm_results = {}
+    arm_positions = {}
+    arm_progresses = {}
+    arm_starts = {}
+    arm_changes = {}
+
+    for arm, j_indices, g_index, j_names in [
+        ("left",  layout.left_joint_indices,  layout.left_gripper_index,  layout.left_joint_names),
+        ("right", layout.right_joint_indices, layout.right_gripper_index, layout.right_joint_names),
+    ]:
+        pos, prog, starts, changes, speeds = _compute_arm_metrics(
+            full_ep_data, j_indices, g_index, dh_params if has_fk else None,
+            args.gripper_change_threshold,
+        )
+        arm_positions[arm] = pos
+        arm_progresses[arm] = prog
+        arm_starts[arm] = starts
+        arm_changes[arm] = changes
+
+        pts, prog_pts = maybe_downsample(pos, prog, args.sample_points, args.seed)
+        pts = apply_visual_jitter(pts, args.viz_jitter_std, args.seed + 17)
+
+        arm_dir = output_dir / arm
+        arm_dir.mkdir(exist_ok=True)
+
+        # EE 3D scatter + projections
+        plot_ee_distribution(pts, prog_pts, starts, changes, coord_labels,
+                             arm_dir / "ee_position_3d.png")
+        for ai, aj, title, xl, yl in [
+            (0, 1, "XY Projection", coord_labels[0], coord_labels[1]),
+            (1, 2, "YZ Projection", coord_labels[1], coord_labels[2]),
+            (0, 2, "XZ Projection", coord_labels[0], coord_labels[2]),
+        ]:
+            plot_ee_projection(pts, prog_pts, starts, changes, ai, aj, title, xl, yl,
+                               arm_dir / f"ee_projection_{xl.lower()}{yl.lower()}.png")
+
+        # Speed histogram
+        plot_speed_histogram(speeds, args.bins, arm_dir / "ee_speed_hist.png")
+
+        # Joint distributions
+        plot_joint_distributions(all_state, j_indices, g_index, j_names,
+                                 arm, arm_dir / "joint_distributions.png")
+
+        def _safe(arr, fn):
+            return float(fn(arr)) if arr.size else float("nan")
+
+        arm_results[arm] = {
+            "frame_count": int(pos.shape[0]),
+            "coord_type": "cartesian_fk" if has_fk else "joint_space",
+            "position_min": pos.min(axis=0).tolist(),
+            "position_max": pos.max(axis=0).tolist(),
+            "position_mean": pos.mean(axis=0).tolist(),
+            "episodes_with_gripper_change": int(changes.shape[0]),
+            "speed_min": _safe(speeds, np.min),
+            "speed_max": _safe(speeds, np.max),
+            "speed_mean": _safe(speeds, np.mean),
+            "speed_median": _safe(speeds, np.median),
+            "speed_p95": _safe(speeds, lambda x: np.percentile(x, 95)),
+        }
+
+    # Combined bimanual EE plot
+    lp, lpr = maybe_downsample(arm_positions["left"],  arm_progresses["left"],  args.sample_points, args.seed)
+    rp, rpr = maybe_downsample(arm_positions["right"], arm_progresses["right"], args.sample_points, args.seed)
+    lp = apply_visual_jitter(lp, args.viz_jitter_std, args.seed + 17)
+    rp = apply_visual_jitter(rp, args.viz_jitter_std, args.seed + 17)
+    plot_bimanual_ee_combined(
+        lp, lpr, rp, rpr,
+        arm_starts["left"], arm_starts["right"],
+        arm_changes["left"], arm_changes["right"],
+        cartesian=has_fk,
+        out_path=output_dir / "ee_bimanual_combined_3d.png",
+    )
+
+    summary = {
+        "episode_count": len(full_ep_data),
+        "robot_type": robot_type,
+        "has_fk": has_fk,
+        "state_key": config.state_key,
+        "left_joint_names": list(layout.left_joint_names),
+        "right_joint_names": list(layout.right_joint_names),
+        "left": arm_results["left"],
+        "right": arm_results["right"],
+    }
+    summary_path = output_dir / "summary.json"
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    print("Analysis complete.")
+    print(f"  Dataset: {dataset_root.name}")
+    print(f"  Episodes: {summary['episode_count']}")
+    print(f"  Left EE frames: {arm_results['left']['frame_count']}  "
+          f"Right EE frames: {arm_results['right']['frame_count']}")
+    print(f"  Outputs: {output_dir}")
+    return summary
+
+
 def analyze_dataset(
     dataset_root: Path,
     output_dir: Path,
@@ -795,6 +1205,16 @@ def analyze_dataset(
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Detect bimanual robot and route to dedicated analysis
+    info = read_dataset_info(dataset_root)
+    features = info.get("features", {})
+    state_feature = features.get(config.state_key, {})
+    bimanual_layout = _detect_bimanual_layout(state_feature)
+    if bimanual_layout is not None:
+        return analyze_bimanual_dataset(
+            dataset_root, parquet_files, info, bimanual_layout, config, output_dir, args
+        )
     episode_data = load_positions_by_episode(
         parquet_files=parquet_files,
         state_key=config.state_key,
