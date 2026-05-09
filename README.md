@@ -10,11 +10,10 @@ Configuration (state key, coordinate indices, gripper index) is auto-detected fr
 
 ## Examples
 
-| LIBERO | 3D Visualization |
+| LIBERO 3D Visualization | LIEBRO Velocity Distribution |
 |:--:|:--:|
-| <img src="src/libero_image.png" alt="LIBERO example" height="240"> | <img src="src/example_libero.png" alt="LIBERO 3D visualization" height="240"> |
+| <img src="src/example_libero.png" alt="LIBERO 3D visualization"> | <img src="src/libero_velocity.png" alt="LIBERO 3D visualization">
 
----
 | Human Collected Data | Script Collected Data |
 |:--:|:--:|
 | ![HUMAN example](src/example_aloha_joint_human.png) | ![SCRIPT example](src/example_aloha_joint_scripted.png) |
