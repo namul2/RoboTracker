@@ -5,10 +5,11 @@ Trajectory statistics and visualizations from [LeRobot](https://github.com/huggi
 - End-effector 2D / 3D position distribution
 - EE speed distribution histogram
 - **Bimanual robots**: per-arm Cartesian EE position (via FK), per-joint angle distribution, combined both-arm 3D plot
+- **Image environment distribution**: first-frame DINOv3 embeddings, UMAP/PCA plots, KMeans clusters, camera pose map
 
 Configuration (state key, coordinate indices, gripper index) is auto-detected from `meta/info.json` and the parquet schema — no manual setup needed for supported formats.
 
-## Examples
+## Trajectory Distribution Examples
 
 | LIBERO 3D Visualization | LIEBRO Velocity Distribution |
 |:--:|:--:|
@@ -17,6 +18,13 @@ Configuration (state key, coordinate indices, gripper index) is auto-detected fr
 | Human Collected Data | Script Collected Data |
 |:--:|:--:|
 | ![HUMAN example](src/example_aloha_joint_human.png) | ![SCRIPT example](src/example_aloha_joint_scripted.png) |
+
+
+## Image Distribution Examples (First Frame with DINOv3)
+
+| DROID_100 Camera Pose | DROID_100 image distribution |
+|:--:|:--:|
+| <img src="src/droid_camera_example.png" alt="DROID_CAMERA"> | <img src="src/droid_embedding_clusters.png" alt="DROID_EMBEDDINGS">
 
 
 ---
@@ -67,6 +75,13 @@ python3 -m pip install -r requirements.txt
 
 **Requirements**: `numpy>=1.26`, `matplotlib>=3.8`, `pyarrow>=16.0`
 
+
+```bash
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu118
+```
+
+Avoid installing `torch`/`torchvision` from both pip and conda in the same environment.
+
 ---
 
 ## Usage
@@ -89,6 +104,49 @@ python3 visualize.py --dataset-root dataset --all-datasets --output-dir outputs
 python3 visualize.py --dataset-root dataset --all-datasets --print-config-only
 ```
 
+**Image environment distribution with DINOv3:**
+
+```bash
+python3 image_clustering.py \
+  --dataset-root dataset \
+  --all-datasets \
+  --output-dir outputs/image_distribution
+```
+
+For video-backed datasets such as DROID, the script uses `--video-backend pyav` by default because OpenCV often prints noisy AV1 decoder logs. If your environment has a different decoder setup, you can try `--video-backend auto` or `--video-backend opencv`.
+
+Extracted first frames are cached under `<DATASET>/first_frames/` in the output directory. Re-running the same command reuses those cached images and skips the slow video decode step unless `--no-image-cache` is set.
+
+**Quick camera/sample check without downloading DINOv3:**
+
+```bash
+python3 image_clustering.py \
+  --dataset-root dataset/aloha_sim_insertion_human_image \
+  --skip-embeddings \
+  --output-dir outputs/image_distribution/aloha_human_check
+```
+
+`image_clustering.py` samples the first frame of each episode for every image/video feature in `meta/info.json` unless `--image-key` is provided. DINOv3 defaults to `facebook/dinov3-vits16-pretrain-lvd1689m` through Hugging Face Transformers.
+
+Camera extrinsics are not included in the current LeRobot metadata files. The script therefore saves `camera_pose_map_3d.png` using a camera-key heuristic by default. For calibrated robot-base camera poses, pass:
+
+```bash
+python3 image_clustering.py \
+  --dataset-root dataset/aloha_sim_insertion_human_image \
+  --camera-pose-json camera_poses.json
+```
+
+Example `camera_poses.json`:
+
+```json
+{
+  "observation.images.top": {
+    "position": [0.0, 0.0, 1.25],
+    "target": [0.0, 0.0, 0.0]
+  }
+}
+```
+
 ---
 
 ## Outputs
@@ -105,6 +163,29 @@ outputs/<DATASET>/
   ee_speed_distribution_hist.png
   summary.json
 outputs/summary_all.json          # merged summary (--all-datasets only)
+```
+
+### Image distribution
+
+```
+outputs/image_distribution/
+  embeddings.npz                  # Global DINOv3 embeddings + global 2D coords
+  embedding_clusters.png           # Global UMAP/PCA colored by KMeans cluster
+  embedding_datasets.png           # Global UMAP/PCA colored by dataset
+  embedding_cameras.png            # Global UMAP/PCA colored by image key
+  cluster_contact_sheet.png        # Global representative first-frame images
+  embedding_summary.json
+  summary.json
+  <DATASET>/
+    camera_pose_map_3d.png
+    first_frames/*.jpg
+    embeddings.npz                # Dataset-only 2D coords/clusters
+    embedding_clusters.png         # Dataset-only UMAP/PCA colored by cluster
+    embedding_cameras.png          # Dataset-only UMAP/PCA colored by camera
+    cluster_contact_sheet.png
+    embedding_summary.json
+    samples.json
+    samples_embedding.json
 ```
 
 ### Bimanual (ALOHA)
