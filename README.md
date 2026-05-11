@@ -6,6 +6,7 @@ Trajectory statistics and visualizations from [LeRobot](https://github.com/huggi
 - EE speed distribution histogram
 - **Bimanual robots**: per-arm Cartesian EE position (via FK), per-joint angle distribution, combined both-arm 3D plot
 - **Image environment distribution**: first-frame DINOv3 embeddings, UMAP/PCA plots, KMeans clusters, camera pose map
+- **OOD analysis**: train/test trajectory, initial robot pose, camera pose, and first-frame image embedding distribution comparison
 
 Configuration (state key, coordinate indices, gripper index) is auto-detected from `meta/info.json` and the parquet schema — no manual setup needed for supported formats.
 
@@ -25,6 +26,13 @@ Configuration (state key, coordinate indices, gripper index) is auto-detected fr
 | DROID_100 Camera Pose | DROID_100 image distribution |
 |:--:|:--:|
 | <img src="src/droid_camera_example.png" alt="DROID_CAMERA"> | <img src="src/droid_embedding_clusters.png" alt="DROID_EMBEDDINGS">
+
+## OOD Detection Examples (LIBERO vs DROID_100)
+
+| OOD Signal Bar | Velocity Differences |
+|:--:|:--:|
+| <img src="src/ood_signal_bar.png" alt="OOD SIGNAL"> | <img src="src/ood_speed_train_test.png" alt="VELOCITY OOD">
+
 
 
 ---
@@ -147,6 +155,50 @@ Example `camera_poses.json`:
 }
 ```
 
+**Out-of-distribution analysis:**
+
+`ood_detection.py` compares train/test distributions across trajectory flow, speed, initial robot pose, camera pose, and first-frame image embeddings. Since OOD is subjective in robotics, the script reports multiple signals instead of a single yes/no label.
+
+Randomly split episodes inside selected datasets:
+
+```bash
+python3 ood_detection.py \
+  --dataset-root dataset \
+  --all-datasets \
+  --dataset-name droid_100 \
+  --dataset-name libero_10_image \
+  --output-dir outputs/ood_detection \
+  --image-output-dir outputs/image_distribution \
+  --train-ratio 0.7 \
+  --seed 42
+```
+
+Compare two different datasets as train vs test:
+
+```bash
+python3 ood_detection.py \
+  --train-dataset-root dataset/droid_100 \
+  --test-dataset-root dataset/libero_10_image \
+  --output-dir outputs/ood_detection/droid_vs_libero \
+  --image-output-dir outputs/image_distribution \
+  --max-episodes 80 \
+  --seed 42
+```
+
+Quick run with fewer episodes:
+
+```bash
+python3 ood_detection.py \
+  --dataset-root dataset/droid_100 \
+  --output-dir outputs/ood_detection/droid_100_quick \
+  --image-output-dir outputs/image_distribution \
+  --max-episodes 30 \
+  --train-ratio 0.7 \
+  --seed 42
+```
+
+Image embedding OOD signals use the cached `embeddings.npz` files from `image_clustering.py`. If those files are missing, trajectory/speed/initial pose analysis still runs, but image embedding plots and metrics are skipped.
+
 ---
 
 ## Outputs
@@ -205,6 +257,22 @@ outputs/<DATASET>/
   summary.json
 ```
 
+### OOD detection
+
+```
+outputs/ood_detection/
+  summary_all.json
+  <DATASET>/
+    ood_report.txt                  # Human-readable text summary
+    ood_summary.json                # Full machine-readable metrics
+    trajectory_train_test_3d.png     # Train/test robot trajectory scatter
+    speed_train_test.png             # Train/test speed distribution
+    initial_environment_3d.png       # Initial robot pose + camera pose map
+    image_embedding_train_test.png   # First-frame embedding split, if available
+    ood_signal_bar.png               # Signal-level OOD strength summary
+    mean_comparison_bar.png          # Test mean shift relative to train std
+```
+
 ### Plot annotations
 
 | Visual element | Meaning |
@@ -213,6 +281,22 @@ outputs/<DATASET>/
 | Cyan `▲` | First frame of each episode |
 | Red `×` | First frame where the gripper value changes |
 | Blue / red tones (bimanual combined) | Left arm / right arm |
+
+### OOD signal interpretation
+
+`ood_signal_bar.png` summarizes how far the test split appears from the train split. Larger bars indicate stronger distribution mismatch. As a rough guide, `0-0.5` is similar, `0.5-1.5` is moderate shift, and `1.5+` is a strong OOD signal.
+
+| Signal | Meaning |
+|--------|---------|
+| `trajectory_position` | Overall robot trajectory position distribution shift |
+| `initial_robot_pose` | Difference in episode starting robot poses |
+| `speed` | End-effector speed distribution shift |
+| `trajectory_descriptor_nn_ratio` | Test episode-level descriptors compared with train nearest-neighbor distances |
+| `camera_pose` | Camera setup/image-key pose shift using metadata or heuristic camera poses |
+| `image_embedding_mean_cosine` | Mean first-frame DINO embedding direction difference |
+| `image_embedding_nn_ratio` | Test image nearest-neighbor distance relative to train image distances |
+
+For robotics datasets, the most useful reading is usually the pattern across signals: large trajectory/speed bars suggest motion mismatch, large initial-pose bars suggest reset or start-state mismatch, and large image/camera bars suggest environment, viewpoint, or visual appearance mismatch.
 
 ---
 
@@ -235,6 +319,20 @@ outputs/<DATASET>/
 | `--viz-jitter-std` | `0.0` | Gaussian jitter std added to plot points (same unit as coords) |
 | `--print-config-only` | off | Print resolved config and exit without plotting |
 
+### OOD options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dataset-root` | `dataset` | Dataset root, or parent dir with `--all-datasets` |
+| `--dataset-name` | unset | Child dataset name to include; repeat for multiple datasets |
+| `--train-dataset-root` | unset | Explicit train dataset root for cross-dataset comparison |
+| `--test-dataset-root` | unset | Explicit test dataset root for cross-dataset comparison |
+| `--image-output-dir` | `outputs/image_distribution` | Existing image embedding output directory |
+| `--train-ratio` | `0.7` | Episode ratio used for random train/test split |
+| `--max-episodes` | unset | Cap episode count before splitting/comparison |
+| `--sample-points` | `50000` | Max trajectory points shown in split plots |
+| `--seed` | `42` | Random seed for episode split and downsampling |
+
 **Examples:**
 
 ```bash
@@ -254,3 +352,7 @@ python3 visualize.py \
   --episode-key <EPISODE_COLUMN> \
   --timestamp-key <TIMESTAMP_COLUMN>
 ```
+
+---
+
+The MIT License applies only to the code in this repository, not to external datasets, pretrained weights, or third-party assets.
