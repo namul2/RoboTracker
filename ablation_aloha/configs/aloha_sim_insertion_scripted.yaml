@@ -1,0 +1,23 @@
+run_name: aloha_sim_insertion_scripted_bc
+checkpoint_dir: ablation_aloha/checkpoints/scripted
+image_size: 128
+batch_size: 64
+epochs: 25
+lr: 0.0003
+weight_decay: 0.00001
+num_workers: 4
+seed: 0
+device: auto
+log_every: 50
+sample_limit:
+tensorboard: true
+tensorboard_dir:
+
+dataset:
+  root: dataset/aloha_sim_insertion_scripted_image
+  image_key: observation.images.top
+  state_key: observation.state
+  action_key: action
+  val_fraction: 0.2
+  frame_stride: 1
+  max_episodes:

@@ -658,8 +658,8 @@ def plot_embedding(
     from matplotlib.lines import Line2D
     from matplotlib.patches import Polygon
 
-    fig, ax = plt.subplots(figsize=(8.8, 6.8), facecolor="#f7f7f4")
-    ax.set_facecolor("#fbfaf7")
+    fig, ax = plt.subplots(figsize=(8.8, 6.8), facecolor="white")
+    ax.set_facecolor("white")
     if color_mode == "cluster":
         values = labels
         legend_names = [f"cluster {i}" for i in sorted(set(labels.tolist()))]
@@ -761,7 +761,7 @@ def plot_embedding(
         loc="best",
         fontsize=8,
         frameon=True,
-        facecolor="#fbfaf7",
+        facecolor="white",
         edgecolor="#d9d5ca",
         framealpha=0.92,
     )

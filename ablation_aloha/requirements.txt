@@ -1,0 +1,13 @@
+numpy
+pandas
+Pillow
+pyarrow
+PyYAML
+torch
+torchvision
+tqdm
+tensorboard
+
+# Optional, only needed if you later add true simulator rollout evaluation.
+gymnasium
+gym-aloha

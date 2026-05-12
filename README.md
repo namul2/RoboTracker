@@ -14,24 +14,24 @@ Configuration (state key, coordinate indices, gripper index) is auto-detected fr
 
 | LIBERO 3D Visualization | LIEBRO Velocity Distribution |
 |:--:|:--:|
-| <img src="src/example_libero.png" alt="LIBERO 3D visualization"> | <img src="src/libero_velocity.png" alt="LIBERO 3D visualization">
+| <img src="figs/example_libero.png" alt="LIBERO 3D visualization"> | <img src="figs/libero_velocity.png" alt="LIBERO 3D visualization">
 
 | Human Collected Data | Script Collected Data |
 |:--:|:--:|
-| ![HUMAN example](src/example_aloha_joint_human.png) | ![SCRIPT example](src/example_aloha_joint_scripted.png) |
+| ![HUMAN example](figs/example_aloha_joint_human.png) | ![SCRIPT example](figs/example_aloha_joint_scripted.png) |
 
 
 ## Image Distribution Examples (First Frame with DINOv3)
 
 | DROID_100 Camera Pose | DROID_100 image distribution |
 |:--:|:--:|
-| <img src="src/droid_camera_example.png" alt="DROID_CAMERA"> | <img src="src/droid_embedding_clusters.png" alt="DROID_EMBEDDINGS">
+| <img src="figs/droid_camera_example.png" alt="DROID_CAMERA"> | <img src="figs/droid_embedding_clusters.png" alt="DROID_EMBEDDINGS">
 
 ## OOD Detection Examples (LIBERO vs DROID_100)
 
 | OOD Signal Bar | Velocity Differences |
 |:--:|:--:|
-| <img src="src/ood_signal_bar.png" alt="OOD SIGNAL"> | <img src="src/ood_speed_train_test.png" alt="VELOCITY OOD">
+| <img src="figs/ood_signal_bar.png" alt="OOD SIGNAL"> | <img src="figs/ood_speed_train_test.png" alt="VELOCITY OOD">
 
 
 
@@ -199,6 +199,62 @@ python3 ood_detection.py \
 
 Image embedding OOD signals use the cached `embeddings.npz` files from `image_clustering.py`. If those files are missing, trajectory/speed/initial pose analysis still runs, but image embedding plots and metrics are skipped.
 
+**OOD episode inspector:**
+
+`ood_episode_inspector.py` ranks individual test episodes by normalized OOD score and explains which signals drove each score. It uses the train split as the reference distribution, then compares each episode across trajectory descriptors, velocity statistics, initial robot pose, first-frame image embeddings, and camera pose/key patterns.
+
+Run the LIBERO/DROID preset. This creates same-dataset train/test splits for `libero_10_image` and `droid_100`, plus a cross-dataset report using LIBERO as train and DROID as test:
+
+```bash
+python3 ood_episode_inspector.py \
+  --preset libero_droid \
+  --dataset-root dataset \
+  --output-dir outputs/ood_episode_inspector \
+  --image-output-dir outputs/image_distribution \
+  --max-episodes 80 \
+  --top-k 20 \
+  --seed 42
+```
+
+Quick smoke test with fewer episodes:
+
+```bash
+python3 ood_episode_inspector.py \
+  --preset libero_droid \
+  --dataset-root dataset \
+  --output-dir outputs/ood_episode_inspector_smoke \
+  --image-output-dir outputs/image_distribution \
+  --max-episodes 12 \
+  --top-k 6 \
+  --seed 42
+```
+
+Inspect a same-dataset split:
+
+```bash
+python3 ood_episode_inspector.py \
+  --dataset-root dataset/libero_10_image \
+  --output-dir outputs/ood_episode_inspector/libero_split \
+  --image-output-dir outputs/image_distribution \
+  --train-ratio 0.7 \
+  --max-episodes 80 \
+  --top-k 20 \
+  --seed 42
+```
+
+Inspect cross-dataset episodes:
+
+```bash
+python3 ood_episode_inspector.py \
+  --train-dataset-root dataset/libero_10_image \
+  --test-dataset-root dataset/droid_100 \
+  --output-dir outputs/ood_episode_inspector/libero_vs_droid \
+  --image-output-dir outputs/image_distribution \
+  --max-episodes 80 \
+  --top-k 20 \
+  --seed 42
+```
+
 ---
 
 ## Outputs
@@ -273,6 +329,28 @@ outputs/ood_detection/
     mean_comparison_bar.png          # Test mean shift relative to train std
 ```
 
+### OOD episode inspector
+
+```
+outputs/ood_episode_inspector/
+  summary_all.json
+  same_dataset_splits/
+    libero_10_image/
+      episode_report.txt              # Top OOD episode reasons
+      episode_inspector_summary.json  # Full machine-readable report
+      episode_scores.csv              # Ranked test episodes
+      train_episode_scores.csv        # Train baseline episode scores
+      ranked_episode_scores.png       # Stacked score contribution ranking
+      score_distribution.png          # Train/test episode score histogram
+      reason_signal_heatmap.png       # Signal matrix with train average row
+      motion_metric_comparison.png    # Top episodes vs train average/std
+    droid_100/
+      (same structure)
+  cross_dataset/
+    libero_10_image_train_vs_droid_100_test/
+      (same structure)
+```
+
 ### Plot annotations
 
 | Visual element | Meaning |
@@ -297,6 +375,28 @@ outputs/ood_detection/
 | `image_embedding_nn_ratio` | Test image nearest-neighbor distance relative to train image distances |
 
 For robotics datasets, the most useful reading is usually the pattern across signals: large trajectory/speed bars suggest motion mismatch, large initial-pose bars suggest reset or start-state mismatch, and large image/camera bars suggest environment, viewpoint, or visual appearance mismatch.
+
+### Episode inspector interpretation
+
+The inspector score is a weighted average of per-signal scores normalized by train behavior. A score around the train average is typical for the reference distribution; episodes beyond the train p95 line are stronger OOD candidates.
+
+| Episode signal | Meaning |
+|----------------|---------|
+| `trajectory` | Episode-level trajectory descriptor nearest-neighbor distance against train |
+| `velocity` | Path length, duration, mean speed, p95 speed, and displacement shift |
+| `initial_pose` | Starting robot pose distance in train-standardized units |
+| `image_embedding` | First-frame visual embedding nearest-neighbor distance |
+| `camera_pose` | Camera pose/key pattern shift, using cached image sample metadata |
+
+Useful files to inspect first:
+
+| File | Use |
+|------|-----|
+| `episode_report.txt` | Human-readable top episode ranking and reasons |
+| `episode_scores.csv` | Sort/filter all ranked test episodes by score or signal |
+| `ranked_episode_scores.png` | See which signal contributes most for each top episode |
+| `reason_signal_heatmap.png` | Compare top episodes against the average train signal row |
+| `motion_metric_comparison.png` | Check raw motion metrics against train mean and std |
 
 ---
 
@@ -332,6 +432,21 @@ For robotics datasets, the most useful reading is usually the pattern across sig
 | `--max-episodes` | unset | Cap episode count before splitting/comparison |
 | `--sample-points` | `50000` | Max trajectory points shown in split plots |
 | `--seed` | `42` | Random seed for episode split and downsampling |
+
+### OOD episode inspector options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--preset` | `none` | Use `libero_droid` to run LIBERO split, DROID split, and LIBERO-vs-DROID |
+| `--dataset-root` | `dataset` | Dataset root, or parent dir used by the preset / `--all-datasets` |
+| `--train-dataset-root` | unset | Explicit train dataset root for cross-dataset episode scoring |
+| `--test-dataset-root` | unset | Explicit test dataset root for cross-dataset episode scoring |
+| `--image-output-dir` | `outputs/image_distribution` | Existing cached image embedding output directory |
+| `--train-ratio` | `0.7` | Episode ratio for same-dataset train/test split |
+| `--max-episodes` | unset | Cap episode count before splitting/comparison |
+| `--top-k` | `20` | Number of highest-scoring episodes shown in plots and summary |
+| `--weights` | built-in | Comma-separated signal weights, such as `trajectory=1.2,velocity=1,image_embedding=0.8` |
+| `--seed` | `42` | Random seed for episode split and subsampling |
 
 **Examples:**
 
