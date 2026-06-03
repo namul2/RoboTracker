@@ -2,15 +2,29 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RoboTracker · Dataset Analysis Dashboard</title>
+<script>
+  (function(){var s=localStorage.getItem('rt-theme');
+    var sys=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches;
+    document.documentElement.setAttribute('data-theme', s||(sys?'light':'dark'));})();
+</script>
 <style>
-:root{
+:root, [data-theme="dark"]{
   --bg:#0e1117; --bg2:#161b22; --card:#1b222c; --line:#2a323d;
   --txt:#e6edf3; --mut:#8b97a7; --acc:#4f9cf9; --acc2:#7ee787;
   --ok:#3fb950; --mod:#d29922; --strong:#f85149; --radius:14px;
+  --shadow:none; --img-bg:#fff;
+}
+[data-theme="light"]{
+  --bg:#f4f6f9; --bg2:#ffffff; --card:#ffffff; --line:#e2e7ee;
+  --txt:#1f2733; --mut:#62707f; --acc:#1f6feb; --acc2:#1a7f37;
+  --ok:#1a7f37; --mod:#9a6700; --strong:#cf222e;
+  --shadow:0 1px 3px rgba(27,40,60,.06),0 1px 2px rgba(27,40,60,.04); --img-bg:#fbfcfd;
 }
 *{box-sizing:border-box} html{scroll-behavior:smooth}
 body{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased}
+  background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased;
+  transition:background .25s ease,color .25s ease}
+.side,.card,.kpi,.chip,.bar-track,.note,.tbl th,.tbl td{transition:background .25s ease,border-color .25s ease,color .25s ease}
 a{color:var(--acc)} code{background:var(--bg2);padding:1px 6px;border-radius:6px;font-size:.86em;color:var(--acc2)}
 .layout{display:flex;min-height:100vh}
 /* sidebar */
@@ -25,7 +39,12 @@ a{color:var(--acc)} code{background:var(--bg2);padding:1px 6px;border-radius:6px
   font-size:14px;font-weight:500;transition:.15s;display:block}
 .nav-item:hover{background:var(--card);color:var(--txt)}
 .nav-item.active{background:rgba(79,156,249,.15);color:var(--acc)}
-.side .foot{margin-top:auto;color:var(--mut);font-size:11px;line-height:1.5}
+.theme-toggle{all:unset;cursor:pointer;margin-top:auto;display:flex;align-items:center;gap:10px;
+  padding:9px 13px;border-radius:9px;color:var(--mut);font-size:13.5px;font-weight:500;
+  border:1px solid var(--line);transition:.15s}
+.theme-toggle:hover{background:var(--card);color:var(--txt)}
+.theme-toggle .ic{font-size:15px;line-height:1}
+.side .foot{color:var(--mut);font-size:11px;line-height:1.5;margin-top:14px}
 /* main */
 .main{flex:1;min-width:0;padding:34px 40px 80px;max-width:1280px}
 .panel{display:none;animation:fade .25s ease} .panel.active{display:block}
@@ -36,13 +55,13 @@ a{color:var(--acc)} code{background:var(--bg2);padding:1px 6px;border-radius:6px
 .group-title{margin:30px 0 4px;font-size:15px;color:var(--mut);text-transform:uppercase;letter-spacing:1px}
 /* kpis */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:14px;margin-bottom:24px}
-.kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}
 .kpi-val{font-size:28px;font-weight:700;letter-spacing:-.5px}
 .kpi-label{font-size:13px;margin-top:2px}
 .kpi-sub{font-size:11.5px;color:var(--mut);margin-top:2px}
 /* cards */
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:22px;margin-bottom:20px}
+  padding:22px;margin-bottom:20px;box-shadow:var(--shadow)}
 .card h3{margin:0;font-size:18px}
 .card-title{display:flex;align-items:center;gap:12px;margin-bottom:14px}
 .badge{font-size:11px;font-weight:600;color:var(--acc);background:rgba(79,156,249,.13);
@@ -58,7 +77,7 @@ a{color:var(--acc)} code{background:var(--bg2);padding:1px 6px;border-radius:6px
 .shot{margin:0;cursor:zoom-in;background:var(--bg2);border:1px solid var(--line);border-radius:10px;
   overflow:hidden;transition:.15s}
 .shot:hover{border-color:var(--acc);transform:translateY(-2px)}
-.shot img{width:100%;display:block;aspect-ratio:4/3;object-fit:contain;background:#fff}
+.shot img{width:100%;display:block;aspect-ratio:4/3;object-fit:contain;background:var(--img-bg)}
 .shot figcaption{padding:7px 10px;font-size:11.5px;color:var(--mut);border-top:1px solid var(--line)}
 .armcols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}
 @media(max-width:900px){.armcols{grid-template-columns:1fr}}
@@ -103,7 +122,10 @@ td.ok{color:var(--ok)} td.mod{color:var(--mod)} td.strong{color:var(--strong)}
       <div><h1>RoboTracker</h1><small>Dataset Analysis</small></div>
     </div>
     <nav><button class="nav-item active" data-target="overview">Overview</button><button class="nav-item" data-target="trajectory">Trajectory</button><button class="nav-item" data-target="image">Image Distribution</button><button class="nav-item" data-target="ood">OOD Detection</button><button class="nav-item" data-target="episode">Episode Inspector</button></nav>
-    <div class="foot">LeRobot trajectory analyzer<br>Generated 2026-06-03 15:42<br>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle color theme">
+      <span class="ic">☀</span><span class="lbl">Light mode</span>
+    </button>
+    <div class="foot">LeRobot trajectory analyzer<br>Generated 2026-06-03 15:51<br>
       <code>build_dashboard.py</code></div>
   </aside>
   <main class="main">
@@ -157,6 +179,21 @@ td.ok{color:var(--ok)} td.mod{color:var(--mod)} td.strong{color:var(--strong)}
   </main>
 </div>
 <script>
+// theme toggle (persisted; defaults to system preference, else dark)
+const root=document.documentElement, tBtn=document.getElementById('themeToggle');
+function applyTheme(t){
+  root.setAttribute('data-theme',t);
+  if(tBtn){tBtn.querySelector('.ic').textContent = t==='dark'?'\u2600':'\u263D';
+    tBtn.querySelector('.lbl').textContent = t==='dark'?'Light mode':'Dark mode';}
+}
+const saved=localStorage.getItem('rt-theme');
+const sysLight=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches;
+applyTheme(saved || (sysLight?'light':'dark'));
+tBtn&&tBtn.addEventListener('click',()=>{
+  const next=root.getAttribute('data-theme')==='dark'?'light':'dark';
+  applyTheme(next); localStorage.setItem('rt-theme',next);
+});
+
 const items=document.querySelectorAll('.nav-item');
 const panels=document.querySelectorAll('.panel');
 items.forEach(b=>b.addEventListener('click',()=>{
